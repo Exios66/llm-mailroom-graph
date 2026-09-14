@@ -10,20 +10,29 @@ source-dir label.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
-OLD_GRAPH = Path("/tmp/opencode/llm-mailroom-graph/graph.json")
-NEW_GRAPH = Path(sys.argv[1] if len(sys.argv) > 1 else "/tmp/opencode/llm-mailroom/graphify-out/graph.json")
-INDEX_OLD = Path("/tmp/opencode/llm-mailroom-graph/index.html")
-REPORT_OLD = Path("/tmp/opencode/llm-mailroom-graph/report.html")
-OUT = Path(sys.argv[2] if len(sys.argv) > 2 else "/tmp/opencode/llm-mailroom-graph")
+# hub#45: derive the artifact paths from THIS script's own location so the
+# recipe runs from any checkout — the old hardcoded /tmp/opencode/... paths
+# crashed with FileNotFoundError on every other machine. argv overrides stay:
+#   python3 scripts/regenerate_graph_site.py [NEW_GRAPH.json] [OUT_DIR]
+HERE = Path(__file__).resolve().parent.parent
+OLD_GRAPH = HERE / "graph.json"  # committed graph: community-name carryover
+NEW_GRAPH = Path(sys.argv[1] if len(sys.argv) > 1 else HERE / "graph.json")
+INDEX_OLD = HERE / "index.html"
+REPORT_OLD = HERE / "report.html"
+OUT = Path(sys.argv[2] if len(sys.argv) > 2 else HERE)
 
 BUILT = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-COMMIT = "d93894a"
+# The graph's source commit: llm-mailroom pinned tip (v0.7.1, the corpus
+# re-pin to GT-closure revision 46a4d3c2). Override with GRAPH_COMMIT when
+# rebuilding from a different checkout.
+COMMIT = os.environ.get("GRAPH_COMMIT", "2a212e76a62b")
 GRAPHIFY_VER = "0.9.53"
 
 old = json.loads(OLD_GRAPH.read_text())
@@ -145,10 +154,14 @@ out = re.sub(r"const GODS = .*?;\n", lambda m: "const GODS = " + json.dumps(gods
 out = re.sub(r"const LAYERS = .*?;\n", lambda m: "const LAYERS = " + json.dumps(layers, separators=(",", ":")) + ";\n", out, count=1, flags=re.S)
 out = re.sub(r"const RELS = .*?;\n", lambda m: "const RELS = " + json.dumps(rels, separators=(",", ":")) + ";\n", out, count=1, flags=re.S)
 out = re.sub(r"const PIPELINE = .*?;\n", lambda m: "const PIPELINE = " + json.dumps(pipeline, separators=(",", ":")) + ";\n", out, count=1, flags=re.S)
-out = re.sub(r"graph · 7dc57874 · 2026-08-28", f"graph · {COMMIT} · {BUILT}", out)
-out = re.sub(r"llm-mailroom@7dc57874", f"llm-mailroom@{COMMIT}", out)
-out = re.sub(r"7dc57874cd4206fa6470a887c38b566f2168daf8", "d93894a6600470bed67e5a2a4f403368577b0f5b", out)
-out = re.sub(r"commit/7dc57874", "commit/d93894a", out)
+# hub#45: stamps are commit-agnostic — the previous literal patterns (built
+# from an older build's sha/date) silently no-op'd on every newer page, which
+# is how the d93894a stamps survived a "successful" regeneration. Rebuilds
+# stamp whatever COMMIT says, never depend on the old page's sha.
+out = re.sub(r"graph · [0-9a-f]{7,40} · \d{4}-\d{2}-\d{2}", f"graph · {COMMIT} · {BUILT}", out)
+out = re.sub(r"llm-mailroom@[0-9a-f]{7,40}", f"llm-mailroom@{COMMIT}", out)
+out = re.sub(r"llm-mailroom/commit/[0-9a-f]{7,40}", f"llm-mailroom/commit/{COMMIT}", out)
+OUT.mkdir(parents=True, exist_ok=True)
 (OUT / "index.html").write_text(out)
 print(f"index.html: {len(nodes_out)} nodes, {len(edges_out)} edges, {len(labels_out)} communities, {len(gods)} gods")
 
@@ -158,14 +171,27 @@ n_nodes, n_edges = len(new["nodes"]), len(new["links"])
 n_comm = len(set(n.get("community") for n in new["nodes"] if n.get("community") is not None))
 n_files = len(set(n.get("source_file") for n in new["nodes"] if n.get("source_file")))
 
-rep = rep.replace("built <b>2026-08-28</b>", f"built <b>{BUILT}</b>")
-rep = rep.replace("commit <b>7dc57874</b>", f"commit <b>{COMMIT}</b>")
-rep = rep.replace("graphify <b>0.9.50</b>", f"graphify <b>{GRAPHIFY_VER}</b>")
-rep = rep.replace('data-count="1730"', f'data-count="{n_nodes}"')
-rep = rep.replace('data-count="4181"', f'data-count="{n_edges}"')
-rep = rep.replace('data-count="102"', f'data-count="{n_comm}"')
-rep = rep.replace('data-count="121"', f'data-count="{n_files}"')
-rep = rep.replace("74 shown · 28 thin omitted", f"{min(n_comm, 74)} shown · {max(n_comm - 74, 0)} thin omitted")
+# hub#45: same commit-agnostic rule for the report pills, and the stat tiles
+# are rewritten from the graph being built — the old literals (1730/4181/…)
+# were the older build's numbers and no-op'd, leaving stale tile counts.
+rep = re.sub(r"built <b>\d{4}-\d{2}-\d{2}</b>", f"built <b>{BUILT}</b>", rep, count=1)
+rep = re.sub(r"commit <b>[0-9a-f]{7,40}</b>", f"commit <b>{COMMIT}</b>", rep, count=1)
+rep = re.sub(r"graphify <b>[0-9.]+</b>", f"graphify <b>{GRAPHIFY_VER}</b>", rep, count=1)
+rep = re.sub(
+    r'data-count="\d+">0</span></div><div class="tile-l">nodes</div>',
+    f'data-count="{n_nodes}">0</span></div><div class="tile-l">nodes</div>', rep, count=1)
+rep = re.sub(
+    r'data-count="\d+">0</span></div><div class="tile-l">edges</div>',
+    f'data-count="{n_edges}">0</span></div><div class="tile-l">edges</div>', rep, count=1)
+rep = re.sub(
+    r'data-count="\d+">0</span></div><div class="tile-l">communities</div>',
+    f'data-count="{n_comm}">0</span></div><div class="tile-l">communities</div>', rep, count=1)
+rep = re.sub(
+    r'data-count="\d+">0</span></div><div class="tile-l">source files</div>',
+    f'data-count="{n_files}">0</span></div><div class="tile-l">source files</div>', rep, count=1)
+rep = re.sub(
+    r"\d+ shown · \d+ thin omitted",
+    f"{min(n_comm, 74)} shown · {max(n_comm - 74, 0)} thin omitted", rep, count=1)
 
 # god rows
 god_rows = "".join(
@@ -195,11 +221,12 @@ wc_arrow = chr(0x2192)
 what_changed = (
     '<section id="fresh">\n<h2>What changed</h2>\n<div class="panel note">\n'
     '<p>Rebuilt from <a href="https://github.com/Exios66/llm-mailroom/commit/'
-    'd93894a6600470bed67e5a2a4f403368577b0f5b"><code>d93894a</code></a> '
-    '(mailroom v0.6.0 + railway-ready deploy + HF corpus v5 + ground truth: '
-    'pared LLM load, 13-node layered-state pipeline, review-resolve tray, '
-    'judge/arbiter lanes, deterministic field scoring, and the mailroom-dev '
-    'monorepo docs alignment).</p>'
+    + COMMIT + '"><code>' + COMMIT[:8] + '</code></a> '
+    '(mailroom v0.7.1 + mailroom-dataset v9 corpus, GT-closure revision '
+    '46a4d3c2 + ground truth: pared LLM load, 13-node layered-state pipeline, '
+    'Gmail triage + relations clerk auxiliary flows, review-resolve tray, '
+    'judge/arbiter lanes, deterministic field scoring, and the '
+    'Digital-Mailroom monorepo docs alignment).</p>'
     '<p style="margin-top:.7rem">This build indexes <b>production '
     '<code>src/</code> only</b> (' + str(n_files) + ' files) so the map follows the live '
     'architecture: <code>review_resolve.py</code>, <code>posthoc_gt.py</code>, '
@@ -222,3 +249,21 @@ rep = re.sub(
     rep, count=1)
 (OUT / "report.html").write_text(rep)
 print("report.html regenerated")
+
+# ---- GRAPH_REPORT.md provenance note ----
+# hub#45: graphify stamps its own checkout HEAD (the monorepo sha), which says
+# nothing about which llm-mailroom revision the extraction represents. A
+# source-provenance note is stamped under the title so the markdown report
+# names the pinned pipeline revision it was built from (idempotent — refreshed
+# on every run, never duplicated).
+report_md = HERE / "GRAPH_REPORT.md"
+if report_md.exists():
+    md = report_md.read_text()
+    note = (
+        "> Source: llm-mailroom @ `" + COMMIT + "` (v0.7.1, mailroom-dataset "
+        "v9 corpus pin 46a4d3c2) — extracted from the Digital-Mailroom "
+        "monorepo checkout.\n"
+    )
+    md = re.sub(r"(^# .*\n\n)(?:> Source: .*\n)?", lambda m: m.group(1) + note, md, count=1)
+    report_md.write_text(md)
+    print("GRAPH_REPORT.md provenance stamped")
